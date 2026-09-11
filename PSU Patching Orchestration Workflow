@@ -1,0 +1,204 @@
+PSU Patching Orchestration Workflow
+Automation Owners: Huiyuan Li (PSU precheck and apply script), George Barclay (OEM Integration)
+Phases of the workflow
+•	Precheck – Take list of services running on server / perform tar backup of Oracle homes / Run analyze operation on Grid/Database Home
+•	Apply – Perform validation of precheck status / place DB monitoring in blackout / Capture list of invalid objects prior to patch / Apply PSU Patch on Grid and Database home per iteration / Compare status of services and object status / Remove services from blackout
+Manual steps to follow
+•	Software for OPatch / PSU binaries need to be downloaded and placed in centralized server – xusvga92409d002
+•	Create a placeholder file on centralized server which has name of script files / software files
+•	Server list targeted for patching (Sat/Sun) need to be created and placed in each OMS server to allocate them under OEM groups.
+High-level workflow of this automation
+Precheck phase (before downtime window)
+•	Segregate list of servers to be patched on Saturday/Sunday and add it to relevant OEM groups in different regions (US/EMEA/Japan).
+•	Validate SSH connectivity between OMS and target DB server to ensure central server can connect.
+•	Transfer software to target server where we have more space by creating a work directory
+•	Perform cleanup on target server work directory to ensure it doesn’t have old files.
+•	Take necessary pre-checks/tar level backups on homes prior to starting PSU precheck operations.
+•	Perform PSU patch analyze on Oracle Grid/Database software homes by transferring the software/opatch files from centralized location
+•	Perform PSU patch analyze for OJVM patch on Oracle Grid/Database software homes.
+•	Based on the result of analyzing operation, update the status on flag file and send mail to Oracle team DL.
+Apply phase (during downtime window)
+•	Ensure the precheck flag file is successful, else stop the operation and report to end user.
+•	If precheck is successful, place DB services in blackout at OEM and comment the crontab scripts
+•	Perform patching on Grid home and ensure all services are up post patching.
+•	Proceed to apply DB Release update and OJVM update on RDBMS home and run sqlpatch to update registry details of database. Compare the invalid object list and ensure it matches. If any failures or mismatch observed post DB patching, report the same to DBA team and mark the step as failure.
+•	Enable OEM monitoring and uncomment the crontab scripts.
+What is not possible in this automation? 
+•	Windows server hosting Oracle databases
+•	Servers that are having conflicts with PSU software.
+Precheck phase
+Step 1 – Software downloads to centralized server (one time)
+•	Download PSU and latest OPatch software from https://support.oracle.com by referring to document ID - Oracle Patch master note 
+•	Use WinZip or any related tool to copy from local desktop to server – xusvga92409d002 to path - /backup/ORACLE/PATCH
+ 
+Step 2 – Create or update placeholder file on centralized server (one time)
+•	Go to location - /export/PSU_DETAILS on server xusvga92409d002
+•	Update properties PSU_PATCH_FILE, OJVM_PATCH_FILE, OPATCH_FILE, TAR_BACKUP_FILE, SCRIPT_FILE_GRID, SCRIPT_FILE_DB, OPATCH_VERSION as per latest file names to use for patch cycle.
+ 
+•	PSU_PATCH_FILE – Name of the release update file downloaded from Oracle 
+•	OJVM_PATCH_FILE – Name of the OJVM update file downloaded from Oracle
+•	OPATCH_FILE – Name of the Opatch folder update file downloaded from Oracle
+•	TAR_BACKUP_FILE – Name of the script file to copy to target to take tar backups
+•	SCRIPT_FILE_GRID – Name of the script file to copy to target server to apply Grid patch
+•	SCRIPT_FILE_DB– Name of the script file to copy to target server to apply RDBMS patch
+•	OPATCH_VERSION – Version value which Oracle recommends as per Readme file of latest patch
+
+Step 3 – Create server list on centralized server to add to OMS groups
+Today, we have 3 OEM servers configured in our environment monitoring databases hosted on respective region
+•	US OEM - https://xusvga92409p001.core-shs-prd-gen-us-east-1.aws.takeda.io:7803/em
+•	EMEA OEM - https://xdefra92409p001.core-shs-prd-gen-eu-central-1.aws.takeda.io:7803/em
+•	Japan OEM - https://xjptyo92409p001.core-shs-prd-gen-ap-northeast-1.aws.takeda.io:7803/em
+We must perform following steps on all 3 OEM servers to add the target servers to respective OEM groups on their maintenance window to perform patching
+OEM group – A collection of host targets that can be created in OEM console to run a specific set of tasks against it
+•	Login to centralized server – xusvga92409d002
+•	Create or edit file - /export/patch_list_server.csv and list the server entries in below format (hostname,ipaddress)
+ 
+•	Login to OEM server and run following script - under /home/oracle which copies the server list from centralized server and add it to respective OEM group. When it prompts for sysman password, provide the same on server.
+ 
+o	PSU_PATCH_SE2_SAT – Group name for servers to be patched on Sat
+o	PSU_PATCH_SE_SUN – Group name for servers to be patched on Sun
+ 
+ 
+ 
+
+Now that above steps are completed, we will proceed to run the jobs from OEM which takes care of pre-check operation.
+
+Job names for each OEM
+Region	Precheck	Apply
+US OEM	For Sat servers - PSU PATCHING PRE CHECKS - STANDARD EDITION
+For Sun servers - PSU PATCHING PRE CHECKS SUNDAY - SE2	For Sat servers - PSU PATCHING APPLY - STANDARD EDITION
+For Sun servers - PSU PATCHING APPLY SUNDAY - SE2
+EMEA OEM	For Sat servers - PSU PATCHING PRE CHECKS SATURDAY - SE2
+For Sun servers - PSU PATCHING PRE CHECKS SUNDAY - SE2	For Sat servers - PSU PATCHING APPLY SATURDAY - SE2
+For Sun servers - PSU PATCHING APPLY SUNDAY - SE2
+Japan OEM	For Sat servers - PSU PATCHING PRE CHECKS SATURDAY - SE2
+For Sun servers - PSU PATCHING PRE CHECKS SUNDAY - SE2	For Sat servers - PSU PATCHING APPLY SATURDAY - SE2
+For Sun servers - PSU PATCHING APPLY SUNDAY - SE2
+
+The only difference between the above jobs are the groups with which they run. The logic of next technical steps is identical for both Sat/Sun servers.
+Below snippet of OEM pre-check job and what each step does for reference
+ 
+The OEM job runs as root user with named credentials created in OEM using SSH keys as per DB install standards.
+ 
+Step 4 – Run the relevant OEM pre-check job from console
+Phase 1 – SSH Key setup
+ 
+•	Runs script - 1_PSU_patch_OEM_shell.bash against the target host as per list of servers in OEM group
+•	This script validates whether SSH key setup for scp_user in centralized server – xusvga92409d002 is already present on target server against grid/oracle user
+•	If SSH key setup for scp_user is not present, this step will configure it.
+•	This is required to transfer software/script from centralized server in Phase 3.
+ 
+
+
+
+Phase 2 – GET_LANDING_PATH
+ 
+•	Runs script - 2_PSU_patch_OEM_shell.bash on target server as per list of servers in OEM group.
+•	This step determines which mountpoint or filesystem has more space (excluding root mount) to copy software and create a work directory (PSU_PATCH) there to take relevant backups.
+•	This step also performs cleanup of work directory (PSU_PATCH) to ensure old files are not consuming space.
+•	This step creates a flag file - /var/tmp/PSU_LANDING_PATH which has the information of where the working directory is created for next set of tasks to know where to look for PSU software and other file location.
+ 
+
+Phase 3 – Transfer_script_software
+ 
+•	This step runs on centralized server – xusvga92409d002 to transfer software and script files from central location - /backup/ORACLE/PATCH to target server working directory captured on previous step - /var/tmp/PSU_LANDING_PATH
+ 
+ 
+Phase 4 – HOME_BACKUP_OPATCH_UPDATE
+ 
+•	This script takes tar backup of Grid / RDBMS / Oracle inventory location which is necessary for rollback operations if any issue happens during patching.
+•	If backup files are consuming more space, it will proceed to compress the file using gzip before proceeding to next step.
+•	Once backup is completed, it will replace the OPatch folder which should be of recent version for patching operation to work.
+•	It will also perform cleanup on Grid / Oracle home to clear patch version files older than 1 patch cycle to release some space on filesystem.
+ 
+ 
+Phase 5 – PSU_PRE_CHECKS
+    
+•	This step runs on target server which runs opatchauto command by taking a snippet of services running on server.
+•	This script will setup the staging script copied from centralized server – xusvga92409d002 under /home/grid and /home/oracle by extracting SCRIPT_FILE_GRID and SCRIPT_FILE_DB respectively.
+•	The file - auto_apply_ru_html_separate.sh will be called by this step to have the workflow related to opatchauto analyze executed on both Grid/Database home.
+o	This will also capture current patch version applied in Grid and database home.
+o	This will capture status of cluster resources running on Oracle Grid HA
+•	Based on the result of pre-check operation, it sends a mail to oracle team DL - dl.Takeda.Oracle.Dba@takeda.com 
+•	It will also create and update a flag file under work directory with status of precheck operation.
+ 
+ 
+ 
+ 
+
+
+
+
+
+
+
+
+
+Apply Phase
+This will be performed during day of CHG implementation. Run the relevant OEM apply job from console.
+ 
+Region	Precheck	Apply
+US OEM	For Sat servers - PSU PATCHING PRE CHECKS - STANDARD EDITION
+For Sun servers - PSU PATCHING PRE CHECKS SUNDAY - SE2	For Sat servers - PSU PATCHING APPLY - STANDARD EDITION
+For Sun servers - PSU PATCHING APPLY SUNDAY - SE2
+EMEA OEM	For Sat servers - PSU PATCHING PRE CHECKS SATURDAY - SE2
+For Sun servers - PSU PATCHING PRE CHECKS SUNDAY - SE2	For Sat servers - PSU PATCHING APPLY SATURDAY - SE2
+For Sun servers - PSU PATCHING APPLY SUNDAY - SE2
+Japan OEM	For Sat servers - PSU PATCHING PRE CHECKS SATURDAY - SE2
+For Sun servers - PSU PATCHING PRE CHECKS SUNDAY - SE2	For Sat servers - PSU PATCHING APPLY SATURDAY - SE2
+For Sun servers - PSU PATCHING APPLY SUNDAY - SE2
+
+Phase 1 – Verify Precheck status
+ 
+•	This step verifies the patch files are present in working directory and validates whether precheck operation performed is successful or not.
+•	If files are missing or precheck operation is marked as failure, the job will fail.
+ 
+Phase 2 – Schedule Blackout Target
+ 
+•	This step places the OEM agent and its underlying monitoring targets in blackout to avoid incidents being created during patching operation.
+•	It also places crontab under oracle user in disabled state to avoid mails.
+ 
+Phase 3 – Apply Operation GI Home
+ 
+•	This step takes care of applying PSU patch by running script - auto_apply_ru_html_separate.sh on Grid Infrastructure home by bringing down the services on its own.
+•	It also takes a snapshot of all services running on server prior to applying patch.
+•	Once patch is successful, it will validate whether services that are online is matching with prior status. If any mismatch observed, the script will mark the operation as failed and send mail for same.
+ 
+ 
+ 
+Phase 4 – Apply Operation DB Home
+ 
+•	This step runs script - auto_apply_ru_html_separate.sh on RDBMS home by bringing down the services on its own.
+•	It takes a copy of services running and list of invalid database objects prior to starting patch operation.
+•	Once patch operation is completed, it will verify whether patch is successful and send a mail of patch status.
+•	It will also validate the status of services and invalid object list post patching and if any difference is found, it will mark status as failed.
+ 
+ 
+ 
+Phase 5 – PSU Post Check
+ 
+•	This step takes care of removing the database monitoring from blackout and ensures crontab is enabled on oracle user
+
+
+
+
+
+Workflow diagram 
+Please refer to below PPT attached for workflow representation of above component.
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
